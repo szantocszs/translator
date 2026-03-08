@@ -1,0 +1,5 @@
+TTS>=0.22.0
+openai>=1.0.0
+openai-whisper>=20231117
+pydub>=0.25.1
+tqdm>=4.66.0
