@@ -1,4 +1,4 @@
-"""Felirat generálás modul — SRT fájlok létrehozása angol és magyar nyelven."""
+"""Felirat generálás modul — SRT fájlok létrehozása és transzkript export."""
 
 import os
 import logging
@@ -49,3 +49,41 @@ def _write_srt(filepath: str, segments: list, lang: str) -> None:
             f.write("\n")
 
     logger.debug(f"SRT fájl írva: {filepath} ({lang}, {len(segments)} szegmens)")
+
+
+def generate_transcript_files(
+    segments: list,
+    output_dir: str,
+    base_name: str,
+) -> dict:
+    """
+    Transzkript fájlok generálása: SRT (időbélyeges) + tiszta szöveg (időbélyeg nélkül).
+
+    Args:
+        segments: Segment-ek listája (start, end, text)
+        output_dir: Kimeneti könyvtár
+        base_name: Fájlnév alap (kiterjesztés nélkül)
+
+    Returns:
+        Dict a generált fájlok útvonalaival: {"srt": "....srt", "txt": "....txt"}
+    """
+    srt_path = os.path.join(output_dir, f"{base_name}.srt")
+    txt_path = os.path.join(output_dir, f"{base_name}.txt")
+
+    # SRT fájl
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, seg in enumerate(segments, 1):
+            start_ts = format_timestamp_srt(seg.start)
+            end_ts = format_timestamp_srt(seg.end)
+            f.write(f"{i}\n")
+            f.write(f"{start_ts} --> {end_ts}\n")
+            f.write(f"{seg.text}\n")
+            f.write("\n")
+
+    # Tiszta szöveg fájl (időbélyegek nélkül)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            f.write(f"{seg.text}\n")
+
+    logger.info(f"Transzkript fájlok generálva: {srt_path}, {txt_path}")
+    return {"srt": srt_path, "txt": txt_path}

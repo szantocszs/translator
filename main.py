@@ -3,8 +3,9 @@
 hu_dub — Magyar szinkron generáló CLI alkalmazás
 
 Módok:
-  subtitle  — Csak felirat: transzkripció + fordítás + SRT fájlok + beágyazott feliratok
-  dub       — Teljes szinkron: felirat + magyar hangsáv (hangklónozással vagy Edge-TTS-sel)
+  transcribe — Csak transzkripció: audio/videó fájlból SRT + tiszta szöveg (magyar nyelv is)
+  subtitle   — Felirat: transzkripció + fordítás + SRT fájlok + beágyazott feliratok
+  dub        — Teljes szinkron: felirat + magyar hangsáv (hangklónozással vagy Edge-TTS-sel)
 
 TTS módszerek (dub módhoz):
   clone     — XTTS-v2 hangklónozás az eredeti beszélő hangjával
@@ -24,6 +25,8 @@ import glob as glob_module
 from transcriber import AVAILABLE_MODELS
 from translator import RECOMMENDED_OLLAMA_MODELS
 from pipeline import Pipeline
+
+SUPPORTED_EXTENSIONS = (".mp4", ".mp3")
 
 
 def setup_logging(verbose: bool = False):
@@ -50,22 +53,36 @@ def get_openai_key(args_key: str = None) -> str:
     return ""
 
 
-def find_mp4_files(path: str, batch: bool) -> list:
+def find_media_files(path: str, batch: bool, mode: str) -> list:
+    """Bemeneti fájl(ok) keresése. Transcribe mód mp3-at és mp4-et is elfogad."""
+    if mode == "transcribe":
+        valid_exts = SUPPORTED_EXTENSIONS
+    else:
+        valid_exts = (".mp4",)
+
     if os.path.isfile(path):
-        if not path.lower().endswith(".mp4"):
-            print(f"Hiba: A fájl nem MP4: {path}", file=sys.stderr)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in valid_exts:
+            exts_str = ", ".join(valid_exts)
+            print(f"Hiba: Nem támogatott fájlformátum: {path} (elfogadott: {exts_str})", file=sys.stderr)
             sys.exit(1)
         return [path]
+
     if os.path.isdir(path):
         if not batch:
             print(f"Hiba: '{path}' könyvtár. Használd a --batch opciót.", file=sys.stderr)
             sys.exit(1)
-        files = sorted(glob_module.glob(os.path.join(path, "*.mp4")))
+        files = []
+        for ext in valid_exts:
+            files.extend(glob_module.glob(os.path.join(path, f"*{ext}")))
+        files = sorted(set(files))
         files = [f for f in files if not f.endswith("_HU.mp4")]
         if not files:
-            print(f"Hiba: Nem találtam MP4 fájlokat: {path}", file=sys.stderr)
+            exts_str = ", ".join(valid_exts)
+            print(f"Hiba: Nem találtam média fájlokat ({exts_str}): {path}", file=sys.stderr)
             sys.exit(1)
         return files
+
     print(f"Hiba: Nem létezik: {path}", file=sys.stderr)
     sys.exit(1)
 
@@ -75,10 +92,16 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="hu_dub",
-        description="Magyar szinkron generáló — angol MP4 videókhoz",
+        description="Magyar szinkron generáló — MP4 videókhoz és audio transzkripció",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Példák:
+  # Transzkripció (mp3/mp4 → SRT + tiszta szöveg, automatikus nyelvfelismerés)
+  python hu_dub/main.py -i "podcast.mp3" --mode transcribe
+
+  # Magyar nyelvű transzkripció (large-v3 modell ajánlott)
+  python hu_dub/main.py -i "eloadas.mp4" --mode transcribe --language hu -w large-v3
+
   # Csak feliratok (nincs szinkron hang)
   python hu_dub/main.py -i "video.mp4" --mode subtitle
 
@@ -100,23 +123,31 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     )
 
     # Alap paraméterek
-    parser.add_argument("-i", "--input", required=True, help="Bemeneti MP4 fájl vagy könyvtár")
+    parser.add_argument("-i", "--input", required=True, help="Bemeneti MP4/MP3 fájl vagy könyvtár")
     parser.add_argument("-o", "--output", help="Kimeneti könyvtár (default: bemeneti mappa)")
-    parser.add_argument("--batch", action="store_true", help="Könyvtár mód: minden MP4 feldolgozása")
-    parser.add_argument("--skip-existing", action="store_true", help="Már létező _HU.mp4 kihagyása")
+    parser.add_argument("--batch", action="store_true", help="Könyvtár mód: minden fájl feldolgozása")
+    parser.add_argument("--skip-existing", action="store_true", help="Már létező kimeneti fájlok kihagyása")
     parser.add_argument("--keep-temp", action="store_true", help="Temp fájlok megtartása (debug)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Részletes log")
 
     # Mód
     parser.add_argument(
-        "--mode", choices=["subtitle", "dub"], default="dub",
-        help="Feldolgozási mód: subtitle (csak felirat) | dub (felirat + szinkron) [default: dub]",
+        "--mode", choices=["transcribe", "subtitle", "dub"], default="dub",
+        help="Feldolgozási mód: transcribe (csak átírás) | subtitle (felirat) | dub (szinkron) [default: dub]",
     )
 
     # Whisper
     parser.add_argument(
-        "-w", "--whisper-model", default="medium", choices=AVAILABLE_MODELS,
-        help="Whisper modell a transzkripciőhoz [default: medium]",
+        "-w", "--whisper-model", default=None, choices=AVAILABLE_MODELS,
+        help="Whisper modell [default: large-v3 transcribe módban, medium egyébként]",
+    )
+
+    # Nyelv (transzkripció)
+    parser.add_argument(
+        "--language", default=None,
+        help="Audio nyelve a transzkripcióhoz (pl. hu, en, de). "
+             "Nincs megadva = automatikus felismerés. "
+             "subtitle/dub módban automatikusan 'en'.",
     )
 
     # Fordítás
@@ -151,9 +182,18 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     args = parser.parse_args()
     logger = setup_logging(args.verbose)
 
-    # Validáció
+    # Whisper modell default: transcribe módnál large-v3, egyébként medium
+    if args.whisper_model is None:
+        args.whisper_model = "large-v3" if args.mode == "transcribe" else "medium"
+
+    # Nyelv kezelés: subtitle/dub módban fix "en", transcribe módban user-defined vagy None (auto)
+    language = args.language
+    if args.mode in ("subtitle", "dub"):
+        language = "en"
+
+    # Validáció: OpenAI kulcs csak subtitle/dub módban kell (ha openai translator)
     api_key = ""
-    if args.translator == "openai":
+    if args.mode != "transcribe" and args.translator == "openai":
         api_key = get_openai_key(args.openai_api_key)
         if not api_key:
             print(
@@ -164,7 +204,7 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
             )
             sys.exit(1)
 
-    mp4_files = find_mp4_files(args.input, args.batch)
+    media_files = find_media_files(args.input, args.batch, args.mode)
 
     if args.output:
         output_dir = args.output
@@ -176,10 +216,14 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     # Info kiírás
     logger.info("hu_dub — Magyar szinkron generáló")
     logger.info(f"  Mód: {args.mode}")
-    logger.info(f"  Fájlok: {len(mp4_files)} db")
+    logger.info(f"  Fájlok: {len(media_files)} db")
     logger.info(f"  Whisper: {args.whisper_model}")
-    trans_info = f"{args.translator} ({args.openai_model})" if args.translator == "openai" else f"{args.translator} ({args.ollama_model})"
-    logger.info(f"  Fordítás: {trans_info}")
+    if args.mode == "transcribe":
+        lang_display = language if language else "automatikus felismerés"
+        logger.info(f"  Nyelv: {lang_display}")
+    else:
+        trans_info = f"{args.translator} ({args.openai_model})" if args.translator == "openai" else f"{args.translator} ({args.ollama_model})"
+        logger.info(f"  Fordítás: {trans_info}")
     if args.mode == "dub":
         logger.info(f"  TTS: {args.tts_method}" + (f" (hangminta: {args.voice_sample_sec}s)" if args.tts_method == "clone" else ""))
     logger.info(f"  Kimenet: {output_dir}")
@@ -188,25 +232,30 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     failed = 0
     skipped = 0
 
-    for i, mp4_file in enumerate(mp4_files):
-        base = os.path.splitext(os.path.basename(mp4_file))[0]
-        out_file = os.path.join(output_dir, f"{base}_HU.mp4")
+    for i, media_file in enumerate(media_files):
+        base = os.path.splitext(os.path.basename(media_file))[0]
+
+        if args.mode == "transcribe":
+            out_check = os.path.join(output_dir, f"{base}.srt")
+        else:
+            out_check = os.path.join(output_dir, f"{base}_HU.mp4")
 
         logger.info(f"\n{'='*60}")
-        logger.info(f"[{i+1}/{len(mp4_files)}] {os.path.basename(mp4_file)}")
+        logger.info(f"[{i+1}/{len(media_files)}] {os.path.basename(media_file)}")
         logger.info(f"{'='*60}")
 
-        if args.skip_existing and os.path.exists(out_file):
-            logger.info(f"  Kihagyva (már létezik): {out_file}")
+        if args.skip_existing and os.path.exists(out_check):
+            logger.info(f"  Kihagyva (már létezik): {out_check}")
             skipped += 1
             continue
 
         try:
             pipeline = Pipeline(
-                input_mp4=mp4_file,
+                input_mp4=media_file,
                 output_dir=output_dir,
                 mode=args.mode,
                 whisper_model=args.whisper_model,
+                language=language,
                 translator=args.translator,
                 openai_api_key=api_key,
                 openai_model=args.openai_model,

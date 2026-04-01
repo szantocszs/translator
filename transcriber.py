@@ -23,13 +23,14 @@ class Segment:
     text: str
 
 
-def transcribe(audio_wav: str, model_name: str = "medium") -> List[Segment]:
+def transcribe(audio_wav: str, model_name: str = "medium", language: str = None) -> List[Segment]:
     """
     Audio fájl transzkripciója Whisper modellel.
 
     Args:
         audio_wav: 16kHz mono WAV fájl útvonala
         model_name: Whisper modell neve (default: medium)
+        language: Nyelv kód (pl. "en", "hu"). None = automatikus felismerés.
 
     Returns:
         Szegmensek listája időbélyegekkel
@@ -45,8 +46,17 @@ def transcribe(audio_wav: str, model_name: str = "medium") -> List[Segment]:
     logger.info(f"Whisper modell betöltése: {model_name}")
     model = whisper.load_model(model_name)
 
-    logger.info(f"Transzkripció indítása: {os.path.basename(audio_wav)}")
-    result = model.transcribe(audio_wav, language="en", verbose=False)
+    lang_info = language if language else "automatikus felismerés"
+    logger.info(f"Transzkripció indítása: {os.path.basename(audio_wav)} (nyelv: {lang_info})")
+
+    transcribe_opts = {"verbose": False}
+    if language:
+        transcribe_opts["language"] = language
+
+    result = model.transcribe(audio_wav, **transcribe_opts)
+
+    detected = result.get("language", "?")
+    logger.info(f"Felismert nyelv: {detected}")
 
     segments = []
     for seg in result["segments"]:

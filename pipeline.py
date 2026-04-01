@@ -12,7 +12,7 @@ from transcriber import transcribe
 from translator import translate_segments
 from voice_cloner import extract_voice_sample, generate_cloned_speech, generate_edge_tts
 from audio_assembler import assemble_audio
-from subtitle_generator import generate_srt_files
+from subtitle_generator import generate_srt_files, generate_transcript_files
 from video_merger import merge_video
 
 logger = logging.getLogger("hu_dub")
@@ -27,6 +27,7 @@ class Pipeline:
         output_dir: str,
         mode: str = "dub",
         whisper_model: str = "medium",
+        language: str = None,
         translator: str = "openai",
         openai_api_key: str = "",
         openai_model: str = "gpt-4o",
@@ -36,10 +37,11 @@ class Pipeline:
         voice_sample_sec: int = 30,
         keep_temp: bool = False,
     ):
-        self.input_mp4 = os.path.abspath(input_mp4)
+        self.input_file = os.path.abspath(input_mp4)
         self.output_dir = os.path.abspath(output_dir)
         self.mode = mode
         self.whisper_model = whisper_model
+        self.language = language
         self.translator = translator
         self.openai_api_key = openai_api_key
         self.openai_model = openai_model
@@ -60,6 +62,9 @@ class Pipeline:
         try:
             ensure_dir(self.output_dir)
 
+            if self.mode == "transcribe":
+                return self._run_transcribe()
+
             # Determine translation model based on backend
             trans_model = self.ollama_model if self.translator == "ollama" else self.openai_model
 
@@ -71,7 +76,7 @@ class Pipeline:
             logger.info("=" * 60)
             logger.info(f"[1/{total_steps}] Audio kinyerés...")
             audio_16k = extract_audio(
-                self.input_mp4,
+                self.input_file,
                 os.path.join(self.work_dir, "audio_16k.wav"),
                 sample_rate=16000, mono=True,
             )
@@ -81,7 +86,7 @@ class Pipeline:
             # 2. Transzkripció
             logger.info("=" * 60)
             logger.info(f"[2/{total_steps}] Transzkripció (Whisper {self.whisper_model})...")
-            segments = transcribe(audio_16k, self.whisper_model)
+            segments = transcribe(audio_16k, self.whisper_model, language="en")
             if not segments:
                 raise RuntimeError("Nem találtam beszédet a videóban!")
             logger.info(f"  {len(segments)} szegmens felismerve")
@@ -117,7 +122,7 @@ class Pipeline:
                 logger.info("=" * 60)
                 logger.info(f"[4/{total_steps}] Hangminta kinyerés ({self.voice_sample_sec}s)...")
                 voice_sample = extract_voice_sample(
-                    self.input_mp4,
+                    self.input_file,
                     os.path.join(self.work_dir, "voice_sample.wav"),
                     duration=self.voice_sample_sec,
                 )
@@ -143,7 +148,7 @@ class Pipeline:
             logger.info(f"[7/{total_steps}] Feliratok és végső MP4...")
             srt_files = generate_srt_files(translated, self.output_dir, self.base_name)
             result = merge_video(
-                self.input_mp4, hungarian_audio,
+                self.input_file, hungarian_audio,
                 srt_files["en"], srt_files["hu"],
                 self.output_mp4,
             )
@@ -163,13 +168,46 @@ class Pipeline:
             elif self.work_dir:
                 logger.info(f"Temp könyvtár megtartva: {self.work_dir}")
 
+    def _run_transcribe(self) -> str:
+        """Transcribe mód: csak transzkripció, SRT + tiszta szöveg kimenet."""
+        total_steps = 2
+
+        # 1. Audio kinyerés
+        logger.info("=" * 60)
+        logger.info(f"[1/{total_steps}] Audio kinyerés...")
+        audio_16k = extract_audio(
+            self.input_file,
+            os.path.join(self.work_dir, "audio_16k.wav"),
+            sample_rate=16000, mono=True,
+        )
+        total_duration = get_audio_duration(audio_16k)
+        logger.info(f"  Audio hossz: {total_duration:.1f}s")
+
+        # 2. Transzkripció
+        logger.info("=" * 60)
+        logger.info(f"[2/{total_steps}] Transzkripció (Whisper {self.whisper_model})...")
+        segments = transcribe(audio_16k, self.whisper_model, language=self.language)
+        if not segments:
+            raise RuntimeError("Nem találtam beszédet a fájlban!")
+        logger.info(f"  {len(segments)} szegmens felismerve")
+
+        # Kimeneti fájlok generálása
+        ensure_dir(self.output_dir)
+        result = generate_transcript_files(segments, self.output_dir, self.base_name)
+
+        logger.info("=" * 60)
+        logger.info(f"✅ Transzkripció kész!")
+        logger.info(f"  SRT: {result['srt']}")
+        logger.info(f"  TXT: {result['txt']}")
+        return result["srt"]
+
     def _merge_subtitle_only(self, srt_files: dict):
         """MP4 feliratokkal de extra audió sáv nélkül."""
         import subprocess
 
         cmd = [
             "ffmpeg", "-y",
-            "-i", self.input_mp4,
+            "-i", self.input_file,
             "-i", srt_files["en"],
             "-i", srt_files["hu"],
             "-map", "0:v:0",

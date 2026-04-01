@@ -18,7 +18,7 @@ def get_audio_duration(filepath: str) -> float:
 
 
 def extract_audio(input_mp4: str, output_wav: str, sample_rate: int = 16000, mono: bool = True) -> str:
-    """Audio kinyerése MP4-ből WAV formátumba."""
+    """Audio kinyerése média fájlból (MP4/MP3) WAV formátumba."""
     cmd = [
         "ffmpeg", "-y", "-i", input_mp4,
         "-vn", "-acodec", "pcm_s16le",
