@@ -53,7 +53,7 @@ def get_openai_key(args_key: str = None) -> str:
     return ""
 
 
-def find_media_files(path: str, batch: bool, mode: str) -> list:
+def find_media_files(path: str, batch: bool, mode: str, recursive: bool = False) -> list:
     """Bemeneti fájl(ok) keresése. Transcribe mód mp3-at és mp4-et is elfogad."""
     if mode == "transcribe":
         valid_exts = SUPPORTED_EXTENSIONS
@@ -73,13 +73,18 @@ def find_media_files(path: str, batch: bool, mode: str) -> list:
             print(f"Hiba: '{path}' könyvtár. Használd a --batch opciót.", file=sys.stderr)
             sys.exit(1)
         files = []
-        for ext in valid_exts:
-            files.extend(glob_module.glob(os.path.join(path, f"*{ext}")))
+        if recursive:
+            for ext in valid_exts:
+                files.extend(glob_module.glob(os.path.join(path, "**", f"*{ext}"), recursive=True))
+        else:
+            for ext in valid_exts:
+                files.extend(glob_module.glob(os.path.join(path, f"*{ext}")))
         files = sorted(set(files))
         files = [f for f in files if not f.endswith("_HU.mp4")]
         if not files:
             exts_str = ", ".join(valid_exts)
-            print(f"Hiba: Nem találtam média fájlokat ({exts_str}): {path}", file=sys.stderr)
+            recursive_hint = " (rekurzív)" if recursive else ""
+            print(f"Hiba: Nem találtam média fájlokat ({exts_str}){recursive_hint}: {path}", file=sys.stderr)
             sys.exit(1)
         return files
 
@@ -117,6 +122,9 @@ Példák:
   # Batch feldolgozás
   python hu_dub/main.py -i ./videos/ --batch -w large-v3 --mode dub --tts-method edge
 
+  # Batch feldolgozás rekurzív könyvtár bejárással
+  python hu_dub/main.py -i ./videos/ --batch -r --mode transcribe --language hu
+
 Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
   {ollama_models_help}
         """,
@@ -126,6 +134,8 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     parser.add_argument("-i", "--input", required=True, help="Bemeneti MP4/MP3 fájl vagy könyvtár")
     parser.add_argument("-o", "--output", help="Kimeneti könyvtár (default: bemeneti mappa)")
     parser.add_argument("--batch", action="store_true", help="Könyvtár mód: minden fájl feldolgozása")
+    parser.add_argument("-r", "--recursive", action="store_true",
+                        help="Rekurzív könyvtár bejárás (--batch opcióval együtt)")
     parser.add_argument("--skip-existing", action="store_true", help="Már létező kimeneti fájlok kihagyása")
     parser.add_argument("--keep-temp", action="store_true", help="Temp fájlok megtartása (debug)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Részletes log")
@@ -204,7 +214,11 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
             )
             sys.exit(1)
 
-    media_files = find_media_files(args.input, args.batch, args.mode)
+    if args.recursive and not args.batch:
+        print("Hiba: --recursive csak --batch opcióval használható.", file=sys.stderr)
+        sys.exit(1)
+
+    media_files = find_media_files(args.input, args.batch, args.mode, args.recursive)
 
     if args.output:
         output_dir = args.output
@@ -226,7 +240,9 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
         logger.info(f"  Fordítás: {trans_info}")
     if args.mode == "dub":
         logger.info(f"  TTS: {args.tts_method}" + (f" (hangminta: {args.voice_sample_sec}s)" if args.tts_method == "clone" else ""))
-    logger.info(f"  Kimenet: {output_dir}")
+    if args.recursive:
+        logger.info(f"  Rekurzív: igen")
+    logger.info(f"  Kimenet: {output_dir}" + (" (forrásfájl mellé)" if args.recursive and not args.output else ""))
 
     success = 0
     failed = 0
@@ -235,13 +251,22 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
     for i, media_file in enumerate(media_files):
         base = os.path.splitext(os.path.basename(media_file))[0]
 
-        if args.mode == "transcribe":
-            out_check = os.path.join(output_dir, f"{base}.srt")
+        # Rekurzív mód + nincs explicit -o: kimenet a forrásfájl könyvtárába
+        if args.recursive and not args.output:
+            file_output_dir = os.path.dirname(os.path.abspath(media_file))
         else:
-            out_check = os.path.join(output_dir, f"{base}_HU.mp4")
+            file_output_dir = output_dir
+
+        if args.mode == "transcribe":
+            out_check = os.path.join(file_output_dir, f"{base}.srt")
+        else:
+            out_check = os.path.join(file_output_dir, f"{base}_HU.mp4")
 
         logger.info(f"\n{'='*60}")
         logger.info(f"[{i+1}/{len(media_files)}] {os.path.basename(media_file)}")
+        if args.recursive:
+            logger.info(f"  Forrás: {media_file}")
+            logger.info(f"  Kimenet: {file_output_dir}")
         logger.info(f"{'='*60}")
 
         if args.skip_existing and os.path.exists(out_check):
@@ -252,7 +277,7 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
         try:
             pipeline = Pipeline(
                 input_mp4=media_file,
-                output_dir=output_dir,
+                output_dir=file_output_dir,
                 mode=args.mode,
                 whisper_model=args.whisper_model,
                 language=language,

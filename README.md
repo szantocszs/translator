@@ -90,8 +90,17 @@ python translator/main.py -i "video.mp4" --translator ollama --ollama-model gemm
 
 ### Batch feldolgozás
 ```bash
+# Egy könyvtár fájljai
 python translator/main.py -i ./videos/ --batch -w large-v3 --mode dub --tts-method edge
+
+# Rekurzív: alkönyvtárak bejárása is
+python translator/main.py -i ./videos/ --batch -r --mode transcribe --language hu
+
+# Rekurzív + explicit kimeneti könyvtár (minden kimenet ide kerül)
+python translator/main.py -i ./videos/ --batch -r -o ./output/ --mode dub --tts-method edge
 ```
+
+> **Megjegyzés:** Rekurzív módban (`-r`) explicit kimeneti könyvtár (`-o`) nélkül minden fájl kimenete a forrásfájl saját könyvtárába kerül.
 
 ### Összes opció
 ```bash
@@ -109,6 +118,7 @@ python translator/main.py \
   --ollama-url http://...       # Ollama szerver URL
   --voice-sample-sec 30         # Hangminta (clone módhoz)
   --batch                       # Könyvtár mód
+  -r / --recursive              # Rekurzív bejárás (--batch-hez)
   --skip-existing               # Már kész fájlok kihagyása
   --keep-temp                   # Debug: temp fájlok megtartása
   --verbose                     # Részletes log
