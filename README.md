@@ -1,4 +1,4 @@
-# hu_dub — Magyar Szinkron Generáló
+# translator — Magyar Szinkron Generáló
 
 MP4 videókhoz és MP3/MP4 audio fájlokhoz automatizált transzkripciót, magyar szinkront és feliratot készítő CLI alkalmazás.
 
@@ -56,46 +56,46 @@ pip install coqui-tts[codec] openai openai-whisper pydub tqdm edge-tts soundfile
 ### Transzkripció (MP3/MP4 → SRT + szöveg)
 ```bash
 # Automatikus nyelvfelismerés
-python hu_dub/main.py -i "podcast.mp3" --mode transcribe
+python translator/main.py -i "podcast.mp3" --mode transcribe
 
 # Magyar nyelv explicit megadása (large-v3 az alapértelmezett transcribe módban)
-python hu_dub/main.py -i "eloadas.mp4" --mode transcribe --language hu
+python translator/main.py -i "eloadas.mp4" --mode transcribe --language hu
 
 # Angol nyelvű videó gyors átírása kisebb modellel
-python hu_dub/main.py -i "talk.mp4" --mode transcribe --language en -w turbo
+python translator/main.py -i "talk.mp4" --mode transcribe --language en -w turbo
 
 # Batch: egy könyvtár összes mp3/mp4 fájlja
-python hu_dub/main.py -i ./recordings/ --batch --mode transcribe --language hu
+python translator/main.py -i ./recordings/ --batch --mode transcribe --language hu
 ```
 
 ### Csak feliratok (gyors, nincs szinkron hang)
 ```bash
-python hu_dub/main.py -i "video.mp4" --mode subtitle
+python translator/main.py -i "video.mp4" --mode subtitle
 ```
 
 ### Szinkron Edge-TTS-sel (általános magyar hang, gyors)
 ```bash
-python hu_dub/main.py -i "video.mp4" --mode dub --tts-method edge
+python translator/main.py -i "video.mp4" --mode dub --tts-method edge
 ```
 
 ### Szinkron hangklónozással (XTTS-v2, a beszélő hangjával)
 ```bash
-python hu_dub/main.py -i "video.mp4" --mode dub --tts-method clone
+python translator/main.py -i "video.mp4" --mode dub --tts-method clone
 ```
 
 ### Ollama-val fordítás (helyi, ingyenes)
 ```bash
-python hu_dub/main.py -i "video.mp4" --translator ollama --ollama-model gemma3:27b
+python translator/main.py -i "video.mp4" --translator ollama --ollama-model gemma3:27b
 ```
 
 ### Batch feldolgozás
 ```bash
-python hu_dub/main.py -i ./videos/ --batch -w large-v3 --mode dub --tts-method edge
+python translator/main.py -i ./videos/ --batch -w large-v3 --mode dub --tts-method edge
 ```
 
 ### Összes opció
 ```bash
-python hu_dub/main.py \
+python translator/main.py \
   -i "video.mp4"                # Bemeneti fájl vagy könyvtár (MP4, transcribe módban MP3 is)
   -o "./output/"                # Kimeneti könyvtár
   --mode dub                    # transcribe | subtitle | dub
