@@ -12,7 +12,7 @@ from transcriber import transcribe
 from translator import translate_segments
 from voice_cloner import extract_voice_sample, generate_cloned_speech, generate_edge_tts
 from audio_assembler import assemble_audio
-from subtitle_generator import generate_srt_files, generate_transcript_files
+from subtitle_generator import generate_srt_files, generate_transcript_files, load_existing_subtitles
 from video_merger import merge_video
 
 logger = logging.getLogger("hu_dub")
@@ -65,71 +65,102 @@ class Pipeline:
             if self.mode == "transcribe":
                 return self._run_transcribe()
 
-            # Determine translation model based on backend
             trans_model = self.ollama_model if self.translator == "ollama" else self.openai_model
-
-            # Step count depends on mode
             is_dub = self.mode == "dub"
-            total_steps = 7 if is_dub else 4
 
-            # 1. Audio kinyerés
-            logger.info("=" * 60)
-            logger.info(f"[1/{total_steps}] Audio kinyerés...")
-            audio_16k = extract_audio(
-                self.input_file,
-                os.path.join(self.work_dir, "audio_16k.wav"),
-                sample_rate=16000, mono=True,
-            )
-            total_duration = get_audio_duration(audio_16k)
-            logger.info(f"  Audio hossz: {total_duration:.1f}s")
+            # Check for existing Hungarian subtitle next to input file
+            existing_hu = self._find_existing_srt("hu")
+            existing_en = self._find_existing_srt("en")
 
-            # 2. Transzkripció
-            logger.info("=" * 60)
-            logger.info(f"[2/{total_steps}] Transzkripció (Whisper {self.whisper_model})...")
-            segments = transcribe(audio_16k, self.whisper_model, language="en")
-            if not segments:
-                raise RuntimeError("Nem találtam beszédet a videóban!")
-            logger.info(f"  {len(segments)} szegmens felismerve")
+            if existing_hu:
+                # === EXISTING SUBTITLE — skip transcription + translation ===
+                translated = load_existing_subtitles(existing_hu, existing_en)
+                logger.info(f"Meglévő magyar felirat betöltve: {existing_hu} ({len(translated)} szegmens)")
 
-            # 3. Fordítás
-            logger.info("=" * 60)
-            logger.info(f"[3/{total_steps}] Fordítás ({self.translator}: {trans_model})...")
-            translated = translate_segments(
-                segments,
-                translator=self.translator,
-                api_key=self.openai_api_key,
-                model=trans_model,
-                ollama_url=self.ollama_url,
-            )
+                if not is_dub:
+                    logger.info("=" * 60)
+                    logger.info("✅ Feliratok már léteznek!")
+                    return existing_hu
 
-            if not is_dub:
-                # === SUBTITLE-ONLY MÓD ===
+                # Dub mode: still need audio duration
+                total_steps = 5 if self.tts_method == "clone" else 4
+                step = 0
+
+                step += 1
                 logger.info("=" * 60)
-                logger.info(f"[4/{total_steps}] Feliratok generálása és beágyazás...")
+                logger.info(f"[{step}/{total_steps}] Audio kinyerés (időtartam)...")
+                audio_16k = extract_audio(
+                    self.input_file,
+                    os.path.join(self.work_dir, "audio_16k.wav"),
+                    sample_rate=16000, mono=True,
+                )
+                total_duration = get_audio_duration(audio_16k)
+                logger.info(f"  Audio hossz: {total_duration:.1f}s")
 
-                srt_files = generate_srt_files(translated, self.output_dir, self.base_name)
+            else:
+                # === NO EXISTING SUBTITLE — full transcription + translation ===
+                if is_dub:
+                    total_steps = 8 if self.tts_method == "clone" else 7
+                else:
+                    total_steps = 4
+                step = 0
 
-                # MP4 beágyazott feliratokkal (eredeti audio megtartva, nincs magyar hang)
-                self._merge_subtitle_only(srt_files)
-
+                step += 1
                 logger.info("=" * 60)
-                logger.info(f"✅ Kész (csak feliratok)! {self.output_mp4}")
-                return self.output_mp4
+                logger.info(f"[{step}/{total_steps}] Audio kinyerés...")
+                audio_16k = extract_audio(
+                    self.input_file,
+                    os.path.join(self.work_dir, "audio_16k.wav"),
+                    sample_rate=16000, mono=True,
+                )
+                total_duration = get_audio_duration(audio_16k)
+                logger.info(f"  Audio hossz: {total_duration:.1f}s")
 
-            # === DUB MÓD ===
-            # 4. Hangminta kinyerés (csak clone módhoz)
+                step += 1
+                logger.info("=" * 60)
+                logger.info(f"[{step}/{total_steps}] Transzkripció (Whisper {self.whisper_model})...")
+                segments = transcribe(audio_16k, self.whisper_model, language="en")
+                if not segments:
+                    raise RuntimeError("Nem találtam beszédet a videóban!")
+                logger.info(f"  {len(segments)} szegmens felismerve")
+
+                step += 1
+                logger.info("=" * 60)
+                logger.info(f"[{step}/{total_steps}] Fordítás ({self.translator}: {trans_model})...")
+                translated = translate_segments(
+                    segments,
+                    translator=self.translator,
+                    api_key=self.openai_api_key,
+                    model=trans_model,
+                    ollama_url=self.ollama_url,
+                )
+
+                step += 1
+                logger.info("=" * 60)
+                logger.info(f"[{step}/{total_steps}] Feliratok generálása...")
+                generate_srt_files(translated, self.output_dir, self.base_name)
+
+                if not is_dub:
+                    hu_srt = os.path.join(self.output_dir, f"{self.base_name}.hu.srt")
+                    logger.info("=" * 60)
+                    logger.info(f"✅ Feliratok generálva! {hu_srt}")
+                    return hu_srt
+
+            # === DUB MODE — TTS + audio assembly + final MP4 ===
+
             if self.tts_method == "clone":
+                step += 1
                 logger.info("=" * 60)
-                logger.info(f"[4/{total_steps}] Hangminta kinyerés ({self.voice_sample_sec}s)...")
+                logger.info(f"[{step}/{total_steps}] Hangminta kinyerés ({self.voice_sample_sec}s)...")
                 voice_sample = extract_voice_sample(
                     self.input_file,
                     os.path.join(self.work_dir, "voice_sample.wav"),
                     duration=self.voice_sample_sec,
                 )
 
-            # 5. TTS generálás
+            step += 1
             logger.info("=" * 60)
-            logger.info(f"[5/{total_steps}] Magyar TTS generálás ({self.tts_method})...")
+            logger.info(f"[{step}/{total_steps}] Magyar TTS generálás ({self.tts_method})...")
             tts_dir = ensure_dir(os.path.join(self.work_dir, "tts"))
 
             if self.tts_method == "clone":
@@ -137,19 +168,17 @@ class Pipeline:
             else:
                 tts_segments = asyncio.run(generate_edge_tts(translated, tts_dir))
 
-            # 6. Audio összeállítás
+            step += 1
             logger.info("=" * 60)
-            logger.info(f"[6/{total_steps}] Audio összeállítás...")
+            logger.info(f"[{step}/{total_steps}] Audio összeállítás...")
             mix_dir = ensure_dir(os.path.join(self.work_dir, "mix"))
             hungarian_audio = assemble_audio(tts_segments, total_duration, mix_dir)
 
-            # 7. Feliratok + Végső MP4
+            step += 1
             logger.info("=" * 60)
-            logger.info(f"[7/{total_steps}] Feliratok és végső MP4...")
-            srt_files = generate_srt_files(translated, self.output_dir, self.base_name)
+            logger.info(f"[{step}/{total_steps}] Végső MP4...")
             result = merge_video(
                 self.input_file, hungarian_audio,
-                srt_files["en"], srt_files["hu"],
                 self.output_mp4,
             )
 
@@ -201,35 +230,15 @@ class Pipeline:
         logger.info(f"  TXT: {result['txt']}")
         return result["srt"]
 
-    def _merge_subtitle_only(self, srt_files: dict):
-        """MP4 feliratokkal de extra audió sáv nélkül."""
-        import subprocess
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", self.input_file,
-            "-i", srt_files["en"],
-            "-i", srt_files["hu"],
-            "-map", "0:v:0",
-            "-map", "0:a:0",
-            "-map", "1:0",
-            "-map", "2:0",
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-c:s", "mov_text",
-            "-metadata:s:a:0", "language=eng",
-            "-metadata:s:s:0", "language=eng",
-            "-metadata:s:s:0", "title=English",
-            "-metadata:s:s:1", "language=hun",
-            "-metadata:s:s:1", "title=Magyar",
-            "-disposition:s:0", "0",
-            "-disposition:s:1", "0",
-            self.output_mp4,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg hiba: {result.stderr[-500:]}")
-
-        size_mb = os.path.getsize(self.output_mp4) / (1024 * 1024)
-        logger.info(f"  Kimeneti fájl: {self.output_mp4} ({size_mb:.1f} MB)")
+    def _find_existing_srt(self, lang_suffix: str) -> str:
+        """Meglévő SRT felirat keresése a bemeneti fájl mellett (és az output könyvtárban)."""
+        input_dir = os.path.dirname(self.input_file)
+        srt_path = os.path.join(input_dir, f"{self.base_name}.{lang_suffix}.srt")
+        if os.path.isfile(srt_path):
+            return srt_path
+        # Output dir is different — check there too
+        if os.path.abspath(self.output_dir) != os.path.abspath(input_dir):
+            srt_path = os.path.join(self.output_dir, f"{self.base_name}.{lang_suffix}.srt")
+            if os.path.isfile(srt_path):
+                return srt_path
+        return None

@@ -4,8 +4,11 @@ hu_dub — Magyar szinkron generáló CLI alkalmazás
 
 Módok:
   transcribe — Csak transzkripció: audio/videó fájlból SRT + tiszta szöveg (magyar nyelv is)
-  subtitle   — Felirat: transzkripció + fordítás + SRT fájlok + beágyazott feliratok
+  subtitle   — Felirat: transzkripció + fordítás + külső SRT fájlok
   dub        — Teljes szinkron: felirat + magyar hangsáv (hangklónozással vagy Edge-TTS-sel)
+
+Ha a bemeneti fájl mellett már létezik .hu.srt felirat, a subtitle/dub mód
+azt használja a transzkripció + fordítás helyett.
 
 TTS módszerek (dub módhoz):
   clone     — XTTS-v2 hangklónozás az eredeti beszélő hangjával
@@ -259,6 +262,8 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
 
         if args.mode == "transcribe":
             out_check = os.path.join(file_output_dir, f"{base}.srt")
+        elif args.mode == "subtitle":
+            out_check = os.path.join(file_output_dir, f"{base}.hu.srt")
         else:
             out_check = os.path.join(file_output_dir, f"{base}_HU.mp4")
 
