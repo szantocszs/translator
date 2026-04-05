@@ -27,6 +27,19 @@ A Whisper `large-v3` modell az alapértelmezett transcribe módban, mert ez keze
 | `clone` | XTTS-v2 hangklónozás a beszélő eredeti hangjával | Igen (CUDA) |
 | `edge` | Edge-TTS általános magyar hang (hu-HU-TamasNeural) | Nem |
 
+## Szinkron stílusok (subtitle/dub módhoz)
+
+| Stílus | Leírás |
+|--------|--------|
+| `precise` | Pontos időzítés, szegmensenként (alapértelmezett) |
+| `natural` | Természetesebb, folyékonyabb magyar — az LLM átírja a fordítást gördülékenyebb stílusra, lazább időzítéssel |
+
+A **natural** stílus lépései:
+1. Az első-körös fordítást (`*.hu.srt`) szegmenscsoportokba rendezi szünetek, mondathatárok és méretkorlátok alapján
+2. Csoportonként elküldi az eredeti angol + magyar szöveget az LLM-nek, hogy természetesebb, stilisztikailag szebb magyarra írja át
+3. Az átírt szöveget mondatokra bontja a TTS-hez, arányosan elosztva az időablakon belül
+4. Eredmény: `*.hu-natural.srt` felirat (az eredeti `*.hu.srt` és `*.en.srt` megmarad)
+
 ## Fordítás backend-ek (subtitle/dub módhoz)
 
 | Backend | Leírás | Költség |
@@ -102,12 +115,25 @@ python translator/main.py -i ./videos/ --batch -r -o ./output/ --mode dub --tts-
 
 > **Megjegyzés:** Rekurzív módban (`-r`) explicit kimeneti könyvtár (`-o`) nélkül minden fájl kimenete a forrásfájl saját könyvtárába kerül.
 
+### Természetesebb szinkron (natural stílus)
+```bash
+# Szinkron természetesebb magyar szöveggel
+python translator/main.py -i "video.mp4" --mode dub --dub-style natural --tts-method edge
+
+# Csak természetesített felirat (szinkron hang nélkül)
+python translator/main.py -i "video.mp4" --mode subtitle --dub-style natural
+
+# Hangklónozással + natural stílus
+python translator/main.py -i "video.mp4" --mode dub --dub-style natural --tts-method clone
+```
+
 ### Összes opció
 ```bash
 python translator/main.py \
   -i "video.mp4"                # Bemeneti fájl vagy könyvtár (MP4, transcribe módban MP3 is)
   -o "./output/"                # Kimeneti könyvtár
   --mode dub                    # transcribe | subtitle | dub
+  --dub-style precise           # precise | natural (subtitle/dub módhoz)
   --language hu                 # Audio nyelve (transcribe módhoz; subtitle/dub = en fix)
   --tts-method clone            # clone | edge (dub módhoz)
   -w large-v3                   # Whisper modell (transcribe default: large-v3, egyébként: medium)
@@ -140,6 +166,7 @@ Keresési sorrend (csak subtitle/dub módban kell, ha OpenAI a fordító):
 | `XYZ_HU.mp4` | subtitle/dub | Videó feliratokkal és/vagy magyar hangsávval |
 | `XYZ_EN.srt` | subtitle/dub | Angol felirat fájl |
 | `XYZ_HU.srt` | subtitle/dub | Magyar felirat fájl |
+| `XYZ.hu-natural.srt` | subtitle/dub + natural | Természetesített magyar felirat (csoportosított) |
 
 ## Whisper modellek
 
