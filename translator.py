@@ -4,8 +4,9 @@ import os
 import logging
 import time
 import json
+import re
 from typing import List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("hu_dub")
 
@@ -37,6 +38,36 @@ class TranslatedSegment:
     end: float
     text_en: str
     text_hu: str
+
+
+@dataclass
+class NaturalizedGroup:
+    """Egy természetesített szegmenscsoport — több eredeti szegmens összevonva."""
+    start: float
+    end: float
+    text_en: str          # eredeti angol szöveg (összefűzve)
+    text_hu_original: str  # első-körös fordítás (összefűzve)
+    text_hu_natural: str   # LLM által átírt természetes magyar szöveg
+    source_indices: List[int] = field(default_factory=list)
+
+
+NATURALIZE_SYSTEM_PROMPT = """Te egy professzionális magyar szinkronszerkesztő vagy. A feladatod, hogy egy első-körös magyar fordítást természetesebb, folyékonyabb magyar szöveggé alakíts.
+
+Szabályok:
+- A szövegnek természetesen, gördülékenyen kell hangoznia, mintha egy anyanyelvi magyar beszélné
+- Nyelvtanilag, stilisztikailag és olvasásra sokkal természetesebben hangozzon
+- Nem kell pontosan egy az egyben ugyanaz legyen — a lényeg a természetesség
+- Tegező formát használj
+- Technikai kifejezéseket tartsd meg angolul: MCP, .NET, Azure, C#, API, SDK, GitHub, Docker, Kubernetes, JSON, REST, HTTP, URL, stb.
+- Tulajdonneveket NE fordítsd: ChatGPT, Claude, Cursor, Airtable, Microsoft, stb.
+- Rövidítéseket tartsd meg: AI, LLM, UI, stb.
+- NE adj hozzá és NE hagyj ki tényeket, információkat — csak a megfogalmazás változzon
+- A szöveg terjedelme maradjon hasonló az eredetihez (beszélt szöveg, időhöz kell illeszkednie)
+- A célhossz körülbelül {target_seconds:.0f} másodpercnyi beszédnek felel meg
+
+Az eredeti angol szöveg referenciaként szolgál — használd a jelentés pontos megőrzéséhez.
+
+Válaszolj CSAK a természetesített magyar szöveggel, semmi mással."""
 
 
 def translate_segments(
@@ -163,3 +194,212 @@ def _parse_translation_response(response_text, segments):
         ))
         logger.debug(f"  [{seg.start:.1f}-{seg.end:.1f}] {seg.text} → {hu_text}")
     return result
+
+
+# ─── Naturalizálás (természetesebb magyar szinkron) ─────────────────────────
+
+def _group_segments_by_gaps(
+    segments: List[TranslatedSegment],
+    gap_threshold: float = 1.5,
+    max_group_duration: float = 60.0,
+    max_group_chars: int = 500,
+) -> List[List[int]]:
+    """
+    Szegmensek csoportosítása természetes töréspontok alapján.
+
+    Több jelet használ a csoporthatárok meghatározásához:
+    - Nagy szünet (gap_threshold) két szegmens között
+    - Mondat végi írásjel az aktuális szegmens végén (. ! ?)
+    - Maximális csoport időtartam (max_group_duration)
+    - Maximális karakter szám (max_group_chars)
+
+    Returns:
+        Lista csoportokból, ahol minden csoport a szegmens indexeket tartalmazza.
+    """
+    if not segments:
+        return []
+
+    groups = []
+    current_group = [0]
+    current_chars = len(segments[0].text_hu)
+
+    for i in range(1, len(segments)):
+        prev = segments[i - 1]
+        curr = segments[i]
+
+        gap = curr.start - prev.end
+        group_duration = curr.end - segments[current_group[0]].start
+        ends_with_sentence = bool(re.search(r'[.!?…]\s*$', prev.text_hu))
+
+        should_break = False
+
+        # Hard break: nagy szünet
+        if gap >= gap_threshold:
+            should_break = True
+        # Hard break: maximális időtartam vagy karakterszám túllépése
+        elif group_duration > max_group_duration:
+            should_break = True
+        elif current_chars + len(curr.text_hu) > max_group_chars:
+            should_break = True
+        # Soft break: közepes szünet + mondatvég
+        elif gap >= 0.8 and ends_with_sentence:
+            should_break = True
+
+        if should_break:
+            groups.append(current_group)
+            current_group = [i]
+            current_chars = len(curr.text_hu)
+        else:
+            current_group.append(i)
+            current_chars += len(curr.text_hu)
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
+def naturalize_segments(
+    segments: List[TranslatedSegment],
+    translator: str = "openai",
+    api_key: str = "",
+    model: str = "gpt-4o",
+    ollama_url: str = "http://localhost:11434",
+    max_retries: int = 3,
+    gap_threshold: float = 1.5,
+    max_group_duration: float = 60.0,
+    max_group_chars: int = 500,
+) -> List[NaturalizedGroup]:
+    """
+    Lefordított szegmensek természetesítése — csoportosítás és LLM átírás.
+
+    1. Szegmensek csoportosítása szünetek és mondathatárok alapján
+    2. Csoportonként LLM hívás a természetesebb magyar szövegért
+    3. NaturalizedGroup lista visszaadása
+
+    Returns:
+        NaturalizedGroup-ok listája a természetesített szöveggel.
+    """
+    # 1. Csoportosítás
+    index_groups = _group_segments_by_gaps(
+        segments, gap_threshold, max_group_duration, max_group_chars,
+    )
+    logger.info(f"Természetesítés: {len(segments)} szegmens → {len(index_groups)} csoport")
+
+    # 2. LLM call_fn előkészítése
+    if translator == "ollama":
+        import urllib.request
+        call_fn = lambda msgs, mdl: _ollama_chat_request(ollama_url, msgs, mdl)
+    else:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        call_fn = lambda msgs, mdl: _openai_chat(client, msgs, mdl)
+
+    # 3. Csoportonkénti természetesítés
+    result = []
+    for g_idx, group_indices in enumerate(index_groups):
+        group_segs = [segments[i] for i in group_indices]
+        group_start = group_segs[0].start
+        group_end = group_segs[-1].end
+        target_seconds = group_end - group_start
+
+        # Szövegek összegyűjtése
+        en_texts = [seg.text_en for seg in group_segs]
+        hu_texts = [seg.text_hu for seg in group_segs]
+        combined_en = " ".join(en_texts)
+        combined_hu = " ".join(hu_texts)
+
+        # LLM hívás
+        system_prompt = NATURALIZE_SYSTEM_PROMPT.format(target_seconds=target_seconds)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": (
+                f"Eredeti angol szöveg (referencia):\n{combined_en}\n\n"
+                f"Első-körös magyar fordítás (ezt írd át természetesebbre):\n{combined_hu}"
+            )},
+        ]
+
+        natural_hu = combined_hu  # fallback
+        for attempt in range(max_retries):
+            try:
+                natural_hu = call_fn(messages, model).strip()
+                break
+            except Exception as e:
+                logger.warning(f"Természetesítés hiba, csoport {g_idx+1} (próba {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Természetesítés sikertelen a(z) {g_idx+1}. csoportnál, eredeti szöveg használata")
+
+        logger.info(f"  Csoport {g_idx+1}/{len(index_groups)} [{group_start:.1f}-{group_end:.1f}s] "
+                     f"({len(group_segs)} szegmens, {target_seconds:.0f}s)")
+        logger.debug(f"    Eredeti: {combined_hu[:80]}...")
+        logger.debug(f"    Természetes: {natural_hu[:80]}...")
+
+        result.append(NaturalizedGroup(
+            start=group_start,
+            end=group_end,
+            text_en=combined_en,
+            text_hu_original=combined_hu,
+            text_hu_natural=natural_hu,
+            source_indices=group_indices,
+        ))
+
+    logger.info(f"Természetesítés kész: {len(result)} csoport")
+    return result
+
+
+def split_natural_group_to_segments(
+    group: NaturalizedGroup,
+) -> List[TranslatedSegment]:
+    """
+    Egy természetesített csoport szétbontása mondatokra TTS-hez.
+
+    A mondatokat arányosan elosztja a csoport időtartamán belül,
+    hogy a TTS ne kapjon túl hosszú szövegeket.
+
+    Returns:
+        TranslatedSegment-ek listája a csoport időablakán belül elosztva.
+    """
+    text = group.text_hu_natural.strip()
+    if not text:
+        return []
+
+    # Mondatokra bontás — pont, felkiáltójel, kérdőjel, három pont után
+    sentences = re.split(r'(?<=[.!?…])\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        sentences = [text]
+
+    total_duration = group.end - group.start
+    total_chars = sum(len(s) for s in sentences)
+
+    if total_chars == 0:
+        return [TranslatedSegment(
+            start=group.start, end=group.end,
+            text_en=group.text_en, text_hu=text,
+        )]
+
+    # Arányos időelosztás a mondatok karakter-hossza alapján
+    segments = []
+    current_start = group.start
+
+    for i, sentence in enumerate(sentences):
+        char_ratio = len(sentence) / total_chars
+        duration = total_duration * char_ratio
+        seg_end = current_start + duration
+
+        # Utolsó mondat: pontosan a csoport végéig
+        if i == len(sentences) - 1:
+            seg_end = group.end
+
+        segments.append(TranslatedSegment(
+            start=current_start,
+            end=seg_end,
+            text_en=group.text_en if i == 0 else "",
+            text_hu=sentence,
+        ))
+        current_start = seg_end
+
+    return segments

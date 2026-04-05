@@ -9,10 +9,10 @@ import shutil
 
 from utils import extract_audio, get_audio_duration, ensure_dir
 from transcriber import transcribe
-from translator import translate_segments
+from translator import translate_segments, naturalize_segments, split_natural_group_to_segments
 from voice_cloner import extract_voice_sample, generate_cloned_speech, generate_edge_tts
 from audio_assembler import assemble_audio
-from subtitle_generator import generate_srt_files, generate_transcript_files, load_existing_subtitles
+from subtitle_generator import generate_srt_files, generate_transcript_files, load_existing_subtitles, generate_natural_srt
 from video_merger import merge_video
 
 logger = logging.getLogger("hu_dub")
@@ -36,6 +36,7 @@ class Pipeline:
         tts_method: str = "clone",
         voice_sample_sec: int = 30,
         keep_temp: bool = False,
+        dub_style: str = "precise",
     ):
         self.input_file = os.path.abspath(input_mp4)
         self.output_dir = os.path.abspath(output_dir)
@@ -50,6 +51,7 @@ class Pipeline:
         self.tts_method = tts_method
         self.voice_sample_sec = voice_sample_sec
         self.keep_temp = keep_temp
+        self.dub_style = dub_style
 
         self.base_name = os.path.splitext(os.path.basename(input_mp4))[0]
         self.output_mp4 = os.path.join(output_dir, f"{self.base_name}_HU.mp4")
@@ -78,12 +80,38 @@ class Pipeline:
                 logger.info(f"Meglévő magyar felirat betöltve: {existing_hu} ({len(translated)} szegmens)")
 
                 if not is_dub:
-                    logger.info("=" * 60)
-                    logger.info("✅ Feliratok már léteznek!")
-                    return existing_hu
+                    if self.dub_style == "natural":
+                        # Subtitle mód + natural: természetesítés
+                        total_steps = 2
+                        step = 0
+
+                        step += 1
+                        logger.info("=" * 60)
+                        logger.info(f"[{step}/{total_steps}] Természetesítés ({self.translator}: {trans_model})...")
+                        natural_groups = naturalize_segments(
+                            translated,
+                            translator=self.translator,
+                            api_key=self.openai_api_key,
+                            model=trans_model,
+                            ollama_url=self.ollama_url,
+                        )
+
+                        step += 1
+                        logger.info("=" * 60)
+                        logger.info(f"[{step}/{total_steps}] Természetesített felirat generálása...")
+                        natural_srt = generate_natural_srt(natural_groups, self.output_dir, self.base_name)
+
+                        logger.info("=" * 60)
+                        logger.info(f"✅ Természetesített felirat kész! {natural_srt}")
+                        return natural_srt
+                    else:
+                        logger.info("=" * 60)
+                        logger.info("✅ Feliratok már léteznek!")
+                        return existing_hu
 
                 # Dub mode: still need audio duration
-                total_steps = 5 if self.tts_method == "clone" else 4
+                natural_extra = 1 if self.dub_style == "natural" else 0
+                total_steps = (5 if self.tts_method == "clone" else 4) + natural_extra
                 step = 0
 
                 step += 1
@@ -99,10 +127,11 @@ class Pipeline:
 
             else:
                 # === NO EXISTING SUBTITLE — full transcription + translation ===
+                natural_extra = 1 if self.dub_style == "natural" else 0
                 if is_dub:
-                    total_steps = 8 if self.tts_method == "clone" else 7
+                    total_steps = (8 if self.tts_method == "clone" else 7) + natural_extra
                 else:
-                    total_steps = 4
+                    total_steps = 4 + natural_extra
                 step = 0
 
                 step += 1
@@ -141,12 +170,47 @@ class Pipeline:
                 generate_srt_files(translated, self.output_dir, self.base_name)
 
                 if not is_dub:
+                    if self.dub_style == "natural":
+                        step += 1
+                        logger.info("=" * 60)
+                        logger.info(f"[{step}/{total_steps}] Természetesítés ({self.translator}: {trans_model})...")
+                        natural_groups = naturalize_segments(
+                            translated,
+                            translator=self.translator,
+                            api_key=self.openai_api_key,
+                            model=trans_model,
+                            ollama_url=self.ollama_url,
+                        )
+                        generate_natural_srt(natural_groups, self.output_dir, self.base_name)
+
                     hu_srt = os.path.join(self.output_dir, f"{self.base_name}.hu.srt")
                     logger.info("=" * 60)
                     logger.info(f"✅ Feliratok generálva! {hu_srt}")
                     return hu_srt
 
             # === DUB MODE — TTS + audio assembly + final MP4 ===
+
+            # Természetesítés (natural mód)
+            if self.dub_style == "natural":
+                step += 1
+                logger.info("=" * 60)
+                logger.info(f"[{step}/{total_steps}] Természetesítés ({self.translator}: {trans_model})...")
+                natural_groups = naturalize_segments(
+                    translated,
+                    translator=self.translator,
+                    api_key=self.openai_api_key,
+                    model=trans_model,
+                    ollama_url=self.ollama_url,
+                )
+                generate_natural_srt(natural_groups, self.output_dir, self.base_name)
+
+                # Természetesített csoportok mondatokra bontása TTS-hez
+                tts_input_segments = []
+                for group in natural_groups:
+                    tts_input_segments.extend(split_natural_group_to_segments(group))
+                logger.info(f"  Természetesített szegmensek TTS-hez: {len(tts_input_segments)}")
+            else:
+                tts_input_segments = translated
 
             if self.tts_method == "clone":
                 step += 1
@@ -164,9 +228,9 @@ class Pipeline:
             tts_dir = ensure_dir(os.path.join(self.work_dir, "tts"))
 
             if self.tts_method == "clone":
-                tts_segments = generate_cloned_speech(translated, voice_sample, tts_dir)
+                tts_segments = generate_cloned_speech(tts_input_segments, voice_sample, tts_dir)
             else:
-                tts_segments = asyncio.run(generate_edge_tts(translated, tts_dir))
+                tts_segments = asyncio.run(generate_edge_tts(tts_input_segments, tts_dir))
 
             step += 1
             logger.info("=" * 60)

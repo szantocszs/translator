@@ -14,6 +14,10 @@ TTS módszerek (dub módhoz):
   clone     — XTTS-v2 hangklónozás az eredeti beszélő hangjával
   edge      — Edge-TTS általános magyar hang (gyorsabb, nincs GPU igény)
 
+Szinkron stílusok (subtitle/dub módhoz):
+  precise   — Pontos időzítés, szegmensenként (alapértelmezett)
+  natural   — Természetesebb, folyékonyabb magyar szöveg, lazább időzítéssel
+
 Fordítás backend-ek:
   openai    — OpenAI GPT API (fizetős, legjobb minőség)
   ollama    — Helyi Ollama LLM (ingyenes, GPU-n fut)
@@ -128,6 +132,12 @@ Példák:
   # Batch feldolgozás rekurzív könyvtár bejárással
   python hu_dub/main.py -i ./videos/ --batch -r --mode transcribe --language hu
 
+  # Természetesebb szinkron (folyékonyabb magyar szöveg, lazább időzítés)
+  python hu_dub/main.py -i "video.mp4" --mode dub --dub-style natural --tts-method edge
+
+  # Természetesített felirat generálása (szinkron hang nélkül)
+  python hu_dub/main.py -i "video.mp4" --mode subtitle --dub-style natural
+
 Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
   {ollama_models_help}
         """,
@@ -192,6 +202,12 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
         help="Hangminta hossza a klónozáshoz [default: 30s, csak clone módhoz]",
     )
 
+    # Szinkron stílus
+    parser.add_argument(
+        "--dub-style", choices=["precise", "natural"], default="precise",
+        help="Szinkron stílus: precise (pontos időzítés) | natural (természetesebb, folyékonyabb) [default: precise]",
+    )
+
     args = parser.parse_args()
     logger = setup_logging(args.verbose)
 
@@ -243,6 +259,9 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
         logger.info(f"  Fordítás: {trans_info}")
     if args.mode == "dub":
         logger.info(f"  TTS: {args.tts_method}" + (f" (hangminta: {args.voice_sample_sec}s)" if args.tts_method == "clone" else ""))
+        logger.info(f"  Stílus: {args.dub_style}")
+    elif args.mode == "subtitle" and args.dub_style == "natural":
+        logger.info(f"  Stílus: {args.dub_style}")
     if args.recursive:
         logger.info(f"  Rekurzív: igen")
     logger.info(f"  Kimenet: {output_dir}" + (" (forrásfájl mellé)" if args.recursive and not args.output else ""))
@@ -294,6 +313,7 @@ Ajánlott Ollama modellek magyar fordításhoz (32GB VRAM):
                 tts_method=args.tts_method,
                 voice_sample_sec=args.voice_sample_sec,
                 keep_temp=args.keep_temp,
+                dub_style=args.dub_style,
             )
             pipeline.run()
             success += 1

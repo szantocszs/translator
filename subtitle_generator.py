@@ -184,3 +184,37 @@ def load_existing_subtitles(hu_srt_path: str, en_srt_path: str = None) -> list:
         )
 
     return result
+
+
+def generate_natural_srt(
+    groups: list,
+    output_dir: str,
+    base_name: str,
+) -> str:
+    """
+    Természetesített magyar SRT felirat generálása NaturalizedGroup-okból.
+
+    Az eredmény {base_name}.hu-natural.srt fájlba kerül.
+    Egy csoport = egy SRT blokk, a csoport időtartamával.
+
+    Args:
+        groups: NaturalizedGroup-ok listája
+        output_dir: Kimeneti könyvtár
+        base_name: Fájlnév alap (kiterjesztés nélkül)
+
+    Returns:
+        A generált SRT fájl útvonala
+    """
+    natural_path = os.path.join(output_dir, f"{base_name}.hu-natural.srt")
+
+    with open(natural_path, "w", encoding="utf-8") as f:
+        for i, group in enumerate(groups, 1):
+            start_ts = format_timestamp_srt(group.start)
+            end_ts = format_timestamp_srt(group.end)
+            f.write(f"{i}\n")
+            f.write(f"{start_ts} --> {end_ts}\n")
+            f.write(f"{group.text_hu_natural}\n")
+            f.write("\n")
+
+    logger.info(f"Természetesített felirat generálva: {natural_path} ({len(groups)} csoport)")
+    return natural_path
